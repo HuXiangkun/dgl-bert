@@ -145,6 +145,28 @@ class BertModel(BertPreTrainedModel):
         return encoded_output, pooled_output
 
 
+class BertForSequenceClassification(BertPreTrainedModel):
+    def __init__(self, config, num_labels):
+        super(BertForSequenceClassification, self).__init__(config)
+        self.num_labels = num_labels
+        self.bert = BertModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, num_labels)
+        self.apply(self.init_bert_weights)
+
+    def forward(self, graph, input_ids, token_type_ids=None, labels=None):
+        _, pooled_output = self.bert(graph, input_ids, token_type_ids)
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            return loss
+        else:
+            return logits
+
+
 if __name__ == '__main__':
     config = BertConfig(vocab_size_or_config_json_file=30522)
     bert = BertModel.from_pretrained('bert-base-uncased')

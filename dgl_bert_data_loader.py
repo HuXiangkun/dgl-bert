@@ -12,11 +12,7 @@ class SentPairClsDataLoader(DataLoader):
                  labels,
                  batch_size,
                  sampler):
-        input_ids = torch.tensor(input_ids, dtype=torch.long)
-        segment_ids = torch.tensor(segment_ids, dtype=torch.long)
-        input_mask = torch.tensor(input_mask, dtype=torch.float)
         attention_mask = (1. - input_mask) * -1e5
-        labels = torch.tensor(labels, dtype=torch.long)
 
         dataset = TensorDataset(input_ids, segment_ids, attention_mask, labels)
         data_sampler = sampler(dataset)
