@@ -12,7 +12,7 @@ class SentPairClsDataLoader(DataLoader):
                  labels,
                  batch_size,
                  sampler):
-        attention_mask = (1. - input_mask) * -1e5
+        attention_mask = (1. - input_mask.float()) * -1e5
 
         dataset = TensorDataset(input_ids, segment_ids, attention_mask, labels)
         data_sampler = sampler(dataset)

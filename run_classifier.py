@@ -311,8 +311,9 @@ def main():
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])):
-                batch = tuple(t.to(device) for t in batch)
-                graph, input_ids, segment_ids, label_ids = batch
+                graph = batch[0]
+                batch = tuple(t.to(device) for t in batch[1:])
+                input_ids, segment_ids, label_ids = batch
 
                 # define a new function to compute loss values for both output_modes
                 logits = model(graph, input_ids, token_type_ids=segment_ids)
