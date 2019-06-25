@@ -136,6 +136,7 @@ class BertModel(BertPreTrainedModel):
         embedding_output = embedding_output.view(-1, hidden_size)
 
         graph.ndata['h'] = embedding_output
+        graph.ndata['attention_mask'] = graph.ndata['attention_mask'].to(input_ids.device)
 
         encoded_graph = self.encoder(graph)
 
