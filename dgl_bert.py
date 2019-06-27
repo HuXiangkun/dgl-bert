@@ -1,6 +1,6 @@
 from torch import nn
 import torch
-from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertEmbeddings, BertPooler, \
+from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertLayerNorm, \
     BertIntermediate, BertOutput, BertSelfOutput, BertConfig
 import copy
 import math
@@ -8,6 +8,8 @@ import numpy as np
 from dgl_bert_data_loader import SentPairClsDataLoader
 from torch.utils.data import RandomSampler
 import dgl
+import dgl.function as fn
+from dgl.nn.pytorch import edge_softmax
 
 
 class BertSelfAttention(nn.Module):
@@ -30,50 +32,35 @@ class BertSelfAttention(nn.Module):
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(*new_x_shape)
-        return x.permute(0, 2, 1, 3)
+        return x
 
     def forward(self, graph):
-        graph.register_message_func(self.message_func)
-        graph.register_reduce_func(self.reduce_func)
+        node_num = graph.ndata['h'].size(0)
+
+        Q = self.query(graph.ndata['h'])
+        K = self.key(graph.ndata['h'])
+        V = self.value(graph.ndata['h'])
+
+        Q = self.transpose_for_scores(Q)
+        K = self.transpose_for_scores(K)
+        V = self.transpose_for_scores(V)
+
+        graph.ndata['Q'] = Q
+        graph.ndata['K'] = K
+        graph.ndata['V'] = V
+
+        graph.apply_edges(fn.u_mul_v('K', 'Q', 'attn_probs'))
+        graph.edata['attn_probs'] = graph.edata['attn_probs'].sum(-1, keepdim=True)
+        graph.edata['attn_probs'] = edge_softmax(graph, graph.edata['attn_probs'])
+        graph.edata['attn_probs'] = self.dropout(graph.edata['attn_probs'])
+        graph.apply_edges(fn.u_mul_e('V', 'attn_probs', 'attn_values'))
+
+        graph.register_message_func(fn.copy_e('attn_values', 'm'))
+        graph.register_reduce_func(fn.sum('m', 'h'))
         graph.update_all()
+        graph.ndata['h'] = graph.ndata['h'].view([node_num, -1])
+
         return graph
-
-    def message_func(self, edges):
-        return {'h': edges.src['h'],
-                'attention_mask': edges.src['attention_mask']}
-
-    def reduce_func(self, nodes):
-        hidden_states = nodes.mailbox['h']
-        attention_mask = nodes.mailbox['attention_mask']
-
-        mixed_query_layer = self.query(nodes.data['h'])
-        mixed_key_layer = self.key(hidden_states)
-        mixed_value_layer = self.value(hidden_states)
-
-        query_layer = self.transpose_for_scores(mixed_query_layer.unsqueeze(1))
-        key_layer = self.transpose_for_scores(mixed_key_layer)
-        value_layer = self.transpose_for_scores(mixed_value_layer)
-
-        # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
-
-        attention_scores = attention_scores + attention_mask.unsqueeze(1).unsqueeze(1)
-
-        # Normalize the attention scores to probabilities.
-        attention_probs = nn.Softmax(dim=-1)(attention_scores)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs = self.dropout(attention_probs)
-
-        context_layer = torch.matmul(attention_probs, value_layer)
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(*new_context_layer_shape)
-
-        return {'h': context_layer.squeeze(1)}
 
 
 class BertAttention(nn.Module):
@@ -117,6 +104,47 @@ class BertEncoder(nn.Module):
         return graph
 
 
+class BertEmbeddings(nn.Module):
+    """Construct the embeddings from word, position and token_type embeddings.
+    """
+    def __init__(self, config):
+        super(BertEmbeddings, self).__init__()
+        self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=0)
+        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
+
+        # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
+        # any TensorFlow checkpoint file
+        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, input_ids, position_ids, token_type_ids=None):
+        if token_type_ids is None:
+            token_type_ids = torch.zeros_like(input_ids)
+
+        words_embeddings = self.word_embeddings(input_ids)
+        position_embeddings = self.position_embeddings(position_ids)
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        embeddings = words_embeddings + position_embeddings + token_type_embeddings
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
+
+
+class BertPooler(nn.Module):
+    def __init__(self, config):
+        super(BertPooler, self).__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.activation = nn.Tanh()
+
+    def forward(self, hidden_states):
+        first_token_tensor = hidden_states
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
+
+
 class BertModel(BertPreTrainedModel):
     def __init__(self, config):
         super(BertModel, self).__init__(config)
@@ -125,25 +153,31 @@ class BertModel(BertPreTrainedModel):
         self.pooler = BertPooler(config)
         self.apply(self.init_bert_weights)
 
-    def forward(self, graph, input_ids, token_type_ids=None):
-        batch_size = input_ids.size(0)
+    def forward(self, graph):
+        embedding_output = self.embeddings(graph.ndata['input_ids'],
+                                           graph.ndata['position_ids'],
+                                           graph.ndata['segment_ids'])
 
-        if token_type_ids is None:
-            token_type_ids = torch.zeros_like(input_ids)
+        graph.ndata.pop('input_ids')
+        graph.ndata.pop('position_ids')
+        graph.ndata.pop('segment_ids')
 
-        embedding_output = self.embeddings(input_ids, token_type_ids)
         hidden_size = embedding_output.size(-1)
         embedding_output = embedding_output.view(-1, hidden_size)
 
         graph.ndata['h'] = embedding_output
-        graph.ndata['attention_mask'] = graph.ndata['attention_mask'].to(input_ids.device)
 
-        encoded_graph = self.encoder(graph)
+        graph = self.encoder(graph)
 
-        encoded_output = encoded_graph.ndata['h'].view(batch_size, -1, hidden_size)
+        g_list = dgl.unbatch(graph)
 
-        pooled_output = self.pooler(encoded_output)
-        return encoded_output, pooled_output
+        pooled_output = []
+        for g in g_list:
+            pooled_output.append(g.ndata['h'][0])
+        pooled_output = torch.stack(pooled_output, 0)
+
+        pooled_output = self.pooler(pooled_output)
+        return graph, pooled_output
 
 
 class BertForSequenceClassification(BertPreTrainedModel):
@@ -155,8 +189,8 @@ class BertForSequenceClassification(BertPreTrainedModel):
         self.classifier = nn.Linear(config.hidden_size, num_labels)
         self.apply(self.init_bert_weights)
 
-    def forward(self, graph, input_ids, token_type_ids=None, labels=None):
-        _, pooled_output = self.bert(graph, input_ids, token_type_ids)
+    def forward(self, graph, labels=None):
+        _, pooled_output = self.bert(graph)
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
 
@@ -171,20 +205,25 @@ class BertForSequenceClassification(BertPreTrainedModel):
 if __name__ == '__main__':
     config = BertConfig(vocab_size_or_config_json_file=30522)
     bert = BertModel.from_pretrained('bert-base-uncased')
-    print(bert)
+    # print(bert)
 
-    # train_input_ids = np.ones([50, 32])
-    # train_segment_ids = np.ones([50, 32])
-    # train_input_mask = np.ones([50, 32])
-    # train_labels = np.ones([50])
-    #
-    # d_loader = SentPairClsDataLoader(train_input_ids,
-    #                                  train_segment_ids,
-    #                                  train_input_mask,
-    #                                  train_labels,
-    #                                  batch_size=5,
-    #                                  sampler=RandomSampler)
-    #
-    # for g, input_ids, segment_ids, labels in d_loader:
-    #     bert(g, input_ids, segment_ids)
-    #     break
+    train_input_ids = []
+    train_input_ids.append(np.ones(5))
+    train_input_ids.append(np.ones(15))
+    train_input_ids.append(np.ones(10))
+
+    train_segment_ids = []
+    train_segment_ids.append(np.ones(5))
+    train_segment_ids.append(np.ones(15))
+    train_segment_ids.append(np.ones(10))
+
+    train_labels = np.ones(3)
+
+    d_loader = SentPairClsDataLoader(train_input_ids,
+                                     train_segment_ids,
+                                     train_labels,
+                                     batch_size=3,
+                                     sampler=RandomSampler)
+
+    for g, labels in d_loader:
+        bert(g)

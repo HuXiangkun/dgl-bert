@@ -6,3 +6,4 @@
 .idea/misc.xml
 *.pyc
 *.xml
+.DS_Store

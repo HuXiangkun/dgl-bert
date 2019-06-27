@@ -246,26 +246,28 @@ def main():
                 with open(cached_train_features_file, "wb") as writer:
                     pickle.dump(train_features, writer)
 
-        all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
-
+        label_dtype = None
         if output_mode == "classification":
-            all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
+            label_dtype = torch.long
         elif output_mode == "regression":
-            all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.float)
+            label_dtype = torch.float
 
         if args.local_rank == -1:
             train_sampler = RandomSampler
         else:
             train_sampler = DistributedSampler
 
+        all_input_ids = [f.input_ids for f in train_features]
+        all_segment_ids = [f.segment_ids for f in train_features]
+        all_label_ids = [f.label_id for f in train_features]
+
         train_dataloader = SentPairClsDataLoader(all_input_ids,
-                                                 all_input_mask,
                                                  all_segment_ids,
                                                  all_label_ids,
                                                  args.train_batch_size,
-                                                 train_sampler)
+                                                 train_sampler,
+                                                 device,
+                                                 label_dtype)
 
         num_train_optimization_steps = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
 
@@ -311,12 +313,12 @@ def main():
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])):
-                graph = batch[0]
-                batch = tuple(t.to(device) for t in batch[1:])
-                input_ids, segment_ids, label_ids = batch
+                # graph = batch[0]
+                # batch = tuple(t.to(device) for t in batch[1:])
+                graph, label_ids = batch
 
                 # define a new function to compute loss values for both output_modes
-                logits = model(graph, input_ids, token_type_ids=segment_ids)
+                logits = model(graph)
 
                 if output_mode == "classification":
                     loss_fct = CrossEntropyLoss()
@@ -336,7 +338,7 @@ def main():
                     loss.backward()
 
                 tr_loss += loss.item()
-                nb_tr_examples += input_ids.size(0)
+                nb_tr_examples += label_ids.size(0)
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     if args.fp16:
@@ -396,30 +398,33 @@ def main():
                 with open(cached_eval_features_file, "wb") as writer:
                     pickle.dump(eval_features, writer)
 
+        all_input_ids = [f.input_ids for f in eval_features]
+        all_segment_ids = [f.segment_ids for f in eval_features]
+        all_label_ids = [f.label_id for f in eval_features]
 
         logger.info("***** Running evaluation *****")
         logger.info("  Num examples = %d", len(eval_examples))
         logger.info("  Batch size = %d", args.eval_batch_size)
-        all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
 
+        label_dtype = None
         if output_mode == "classification":
-            all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
+            label_dtype = torch.long
         elif output_mode == "regression":
-            all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.float)
+            label_dtype = torch.float
 
         # Run prediction for full data
         if args.local_rank == -1:
             eval_sampler = SequentialSampler
         else:
             eval_sampler = DistributedSampler  # Note that this sampler samples randomly
+
         eval_dataloader = SentPairClsDataLoader(all_input_ids,
                                                 all_segment_ids,
-                                                all_input_mask,
                                                 all_label_ids,
                                                 args.eval_batch_size,
-                                                eval_sampler)
+                                                eval_sampler,
+                                                device,
+                                                label_dtype)
 
         model.eval()
         eval_loss = 0
@@ -427,13 +432,9 @@ def main():
         preds = []
         out_label_ids = None
 
-        for graph, input_ids, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
-            input_ids = input_ids.to(device)
-            segment_ids = segment_ids.to(device)
-            label_ids = label_ids.to(device)
-
+        for graph, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
             with torch.no_grad():
-                logits = model(graph, input_ids, token_type_ids=segment_ids)
+                logits = model(graph)
 
             # create eval loss and other metric required by the task
             if output_mode == "classification":
