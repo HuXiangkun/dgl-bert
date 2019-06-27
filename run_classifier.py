@@ -375,13 +375,13 @@ def main():
         # Good practice: save your training arguments together with the trained model
         output_args_file = os.path.join(args.output_dir, 'training_args.bin')
         torch.save(args, output_args_file)
-    else:
-        model = BertForSequenceClassification.from_pretrained(args.bert_model, num_labels=num_labels)
-
-    model.to(device)
 
     ### Evaluation
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
+        model_file = os.path.join(args.output_dir, WEIGHTS_NAME)
+        if os.path.exists(model_file):
+            model.load_state_dict(torch.load(model_file))
+
         eval_examples = processor.get_dev_examples(args.data_dir)
         cached_eval_features_file = os.path.join(args.data_dir, 'dev_{0}_{1}_{2}'.format(
             list(filter(None, args.bert_model.split('/'))).pop(),
