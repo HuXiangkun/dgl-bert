@@ -130,8 +130,6 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
-
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
