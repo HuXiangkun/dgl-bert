@@ -192,7 +192,7 @@ def main():
                                                  device,
                                                  label_dtype)
 
-        num_train_optimization_steps = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
+        num_train_optimization_steps = (len(all_input_ids) // args.train_batch_size) * args.num_train_epochs
 
         # Prepare optimizer
         optimizer = BertAdam(model.parameters(),
