@@ -309,10 +309,10 @@ def main():
         logger.info("  Num steps = %d", num_train_optimization_steps)
 
         model.train()
-        for _ in trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0]):
+        for epoch in range(int(args.num_train_epochs)):
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
-            for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])):
+            for step, batch in enumerate(train_dataloader):
                 # graph = batch[0]
                 # batch = tuple(t.to(device) for t in batch[1:])
                 graph, label_ids = batch
@@ -336,6 +336,9 @@ def main():
                     optimizer.backward(loss)
                 else:
                     loss.backward()
+
+                if step % 20 == 0:
+                    print(f"Epoch {epoch}, step {step}, loss {loss.cpu().data.numpy()}, lr {optimizer.get_lr()[0]}")
 
                 tr_loss += loss.item()
                 nb_tr_examples += label_ids.size(0)
@@ -380,7 +383,7 @@ def main():
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
         model_file = os.path.join(args.output_dir, WEIGHTS_NAME)
         if os.path.exists(model_file):
-            model.load_state_dict(torch.load(model_file))
+            model.load_state_dict(torch.load(model_file, map_location=device))
 
         eval_examples = processor.get_dev_examples(args.data_dir)
         cached_eval_features_file = os.path.join(args.data_dir, 'dev_{0}_{1}_{2}'.format(
